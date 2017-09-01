@@ -3,7 +3,6 @@ var url = require('url');
 var request = require('request');
 var async = require('async');
 var cookieSign = require('cookie-signature');
-var deepcopy = require('deepcopy');
 
 var getCookie = routilCookie.getCookie;
 var setCookie = routilCookie.setCookie;
@@ -21,24 +20,9 @@ var toFunction = function(str) {
 	};
 };
 
-var defaultRandomSecret = Math.random().toString();
-var ghSecretState = Math.random().toString();
-
 module.exports = function(clientId, clientSecret, config) {
-	// We don't want to accidentally mutate the object we were passed.
-	config = deepcopy(config);
-
-	// GitHub enforces lowercase names for organizations and teams.
-	// The checks later on are simplified by normalizing here.
-	if(config.organization) {
-		config.organization = config.organization.toLowerCase();
-	}
-	if(config.team) {
-		config.team = config.team.toLowerCase();
-	}
-
-	var scope = ((config.team || config.organization) && !config.credentials)  ? 'user' : 'public';
-	var secret = config.secret || defaultRandomSecret;
+	var scope = config.scope ? config.scope : ((config.team || config.organization) && !config.credentials)  ? 'user' : 'public';
+	var secret = config.secret || Math.random().toString();
 	var userAgent = config.ua || 'github-auth';
 	var redirectUri = config.redirectUri || '';
 	var accessToken;
@@ -170,16 +154,7 @@ module.exports = function(clientId, clientSecret, config) {
 	};
 
 	var ghUrl = function(req) {
-		return 'https://github.com/login/oauth/authorize?client_id=' + clientId + '&scope=' + scope +
-			'&redirect_uri=' + redirectUri(req) + '&state=' + ghSecretState;
-	};
-
-	var cleanUrl = function(req) {
-		var u = url.parse(req.url, true);
-		delete u.search;
-		delete u.query.code;
-		delete u.query.state;
-		return url.format(u);
+		return 'https://github.com/login/oauth/authorize?client_id='+clientId+ '&scope=' + scope + '&redirect_uri=' + redirectUri(req);
 	};
 
 	var login = function(req, res, next) {
@@ -201,11 +176,6 @@ module.exports = function(clientId, clientSecret, config) {
 		authenticate: function(req, res, next) {
 			var cookie = getCookie(req, cookieName);
 			var val = cookie ? cookieSign.unsign(cookie, secret): false;
-			var updateCode = function () {
-				if (config.autologin) return redirect(ghUrl(req), res);
-				delete req.github;
-				return next();
-			};
 			req.github = {};
 			if (val) {
 				req.github.authenticated = true;
@@ -213,8 +183,10 @@ module.exports = function(clientId, clientSecret, config) {
 				return next();
 			}
 			var u = url.parse(req.url, true);
-			if (!u.query.code || u.query.state !== ghSecretState) {
-				return updateCode();
+			if (!u.query.code) {
+				if (config.autologin) return redirect(ghUrl(req), res);
+				delete req.github;
+				return next();
 			}
 			request.post('https://github.com/login/oauth/access_token',	{
 				headers: {
@@ -223,15 +195,11 @@ module.exports = function(clientId, clientSecret, config) {
 				form: {
 					client_id: clientId,
 					client_secret: clientSecret,
-					code: u.query.code,
-					state: ghSecretState
+					code: u.query.code
 				}
 			}, function(err, response, body) {
 				if (err) return next(err);
 				var resp = url.parse('/?'+body, true);
-				if (!resp.query.access_token) {
-					return updateCode();
-				}
 				accessToken = resp.query.access_token;
 
 				getUser(function(err, ghusr) {
@@ -253,7 +221,6 @@ module.exports = function(clientId, clientSecret, config) {
 						if (!auth) {
 							req.github.authenticated = false;
 							req.github.user = ghusr;
-							if (config.autologin) return redirect(ghUrl(req), res);
 							return next();
 						}
 						var opts = {};
@@ -261,9 +228,6 @@ module.exports = function(clientId, clientSecret, config) {
 						setCookie(res, cookieName, cookieSign.sign(ghusr, secret), opts);
 						req.github.user = ghusr;
 						req.github.authenticated = true;
-						if (config.hideAuthInternals && (u.query.code || u.query.state)) {
-							return redirect(cleanUrl(req), res);
-						}
 						next();
 					});
 				});
